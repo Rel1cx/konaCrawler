@@ -2,52 +2,75 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
-	"sync"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/levigross/grequests"
+	"github.com/remeh/sizedwaitgroup"
 )
 
-var waitGroup sync.WaitGroup
+var (
+	swg      = sizedwaitgroup.New(20)
+	savePath = "./images"
+)
+
+func extractLinks(url string) (links []string, err error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	doc.Find(".directlink").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("href")
+		if exists {
+			links = append(links, src)
+		}
+	})
+	return links, err
+}
+
+func downloadFile(filepath string, url string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func init() {
+	if _, err := os.Stat(savePath); os.IsNotExist(err) {
+		os.Mkdir(savePath, 0644)
+	}
+}
 
 func main() {
-	count := 0
-	for page := 1; page <= 100; page++ {
-		baseURL := "http://konachan.net/post?page=" + strconv.Itoa(page)
-		fmt.Printf("\n\n[第%d页]\n\n", page)
-		res, _ := grequests.Get(baseURL, nil)
-		doc, err := goquery.NewDocumentFromReader(res)
+	for page := 1; page <= 1000; page++ {
+		url := "http://konachan.net/post?page=" + strconv.Itoa(page)
+		links, err := extractLinks(url)
 		if err != nil {
-			fmt.Errorf("下载错误:%#v\n", err)
-			os.Exit(-1)
+			continue
 		}
-		defer res.Close()
-		n := 0
-		doc.Find(".directlink").Each(func(i int, s *goquery.Selection) {
-			src, exists := s.Attr("href")
-			if exists {
-				// fmt.Println(src)
-				waitGroup.Add(1)
-				go func(src string) {
-					defer waitGroup.Done()
-					filename := src[88:len(src)]
-					res, _ := grequests.Get(src, &grequests.RequestOptions{Headers: map[string]string{
-						"Referer":    "http://konachan.net",
-						"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.92 Safari/537.36"}})
-					if err := res.DownloadToFile(filename); err != nil {
-						log.Println("Error: ", err)
-					} else {
-						count++
-						fmt.Printf("已下载%d张\n", count)
-					}
-					n++
-				}(src)
-			}
-		})
+		for idx, src := range links {
+			defer swg.Wait()
+			swg.Add()
+			go func(idx int, src string) {
+				defer swg.Done()
+				err := downloadFile(fmt.Sprintf("./images/P%vN%v%s", page, idx, filepath.Ext(src)), src)
+				if err != nil {
+					fmt.Println(err)
+				}
+			}(idx, src)
+		}
 	}
-	waitGroup.Wait()
-	fmt.Println("下载完成")
 }
